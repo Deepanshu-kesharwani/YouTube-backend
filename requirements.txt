@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+python-dotenv
+google-generativeai
+langchain
+langchain-core
+langchain-community
+langchain-google-genai
+faiss-cpu
+sentence-transformers
+youtube-transcript-api
+pydantic
+typing_extensions
