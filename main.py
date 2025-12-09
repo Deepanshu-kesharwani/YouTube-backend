@@ -4,24 +4,22 @@ This file provides /fetch_transcript, /chat and /ask endpoints.
 Drop this into your Python project and run with:
 
   export GOOGLE_API_KEY="YOUR_KEY"
-  uvicorn app:app --reload --port 8000
+  uvicorn main:app --reload --port 8000
 
 Make sure necessary libraries are installed in your venv.
 """
-import google.generativeai as genai
 import re
 import traceback
 import threading
 from typing import Optional
+import os
+
+import google.generativeai as genai
 from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
-import os
-load_dotenv()
-api_key = os.getenv("GOOGLE_API_KEY")
-genai.configure(api_key=api_key)
 
 # Transcript helper imports (youtube-transcript-api)
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
@@ -32,12 +30,14 @@ from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
 from langchain_google_genai import ChatGoogleGenerativeAI
-import google.generativeai as genai
 
 # ---------- Config ----------
+load_dotenv()
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 if not GOOGLE_API_KEY:
     print("WARNING: GOOGLE_API_KEY not set in environment. Set it before production run.")
+
+genai.configure(api_key=GOOGLE_API_KEY)
 
 # ---------- App ----------
 app = FastAPI(title="YouTube RAG Chat API")
@@ -55,15 +55,18 @@ class FetchRequest(BaseModel):
     url: str
     lang: Optional[str] = "en"
 
+
 class ChatRequest(BaseModel):
     question: str
     top_k: Optional[int] = 4
+
 
 class AskRequest(BaseModel):
     url: str
     lang: Optional[str] = "en"
     question: str
     top_k: Optional[int] = 4
+
 
 # ---------- Global state (simple) ----------
 _state_lock = threading.Lock()
@@ -72,7 +75,8 @@ _retriever = None
 _transcript_text = ""   # keep last transcript (preview)
 _video_id = None
 
-# ---------- Transcript normalization helper (from your notebook) ----------
+
+# ---------- Transcript normalization helper ----------
 def _to_seconds(val):
     try:
         if val is None:
@@ -104,7 +108,7 @@ def _normalize_to_text_with_timestamps(obj):
         return {"text": text if text is not None else "", "start": start, "duration": duration}
 
     start_keys = ("start", "time", "timestamp", "offset", "start_ms", "start_time")
-    dur_keys   = ("duration", "dur", "length", "duration_ms", "end_time")
+    dur_keys = ("duration", "dur", "length", "duration_ms", "end_time")
 
     if isinstance(obj, list):
         out = []
@@ -143,45 +147,19 @@ def _normalize_to_text_with_timestamps(obj):
 
 
 def get_transcript_list_with_timestamps(video_id, languages=None, debug=False):
-    api = YouTubeTranscriptApi
+    """
+    Simple, robust wrapper around youtube_transcript_api.
+    Uses only the official get_transcript() API.
+    Any errors (disabled / not found) are raised as TranscriptsDisabled / NoTranscriptFound
+    and handled in the endpoints.
+    """
+    if debug:
+        print(f"Fetching transcript for video_id={video_id}, languages={languages}")
+    raw = YouTubeTranscriptApi.get_transcript(video_id, languages=languages)
+    return _normalize_to_text_with_timestamps(raw)
 
-    if hasattr(api, "get_transcript"):
-        if debug: print("Using get_transcript (class)")
-        raw = api.get_transcript(video_id, languages=languages)
-        return _normalize_to_text_with_timestamps(raw)
-
-    if hasattr(api, "fetch"):
-        fetch = getattr(api, "fetch")
-        try:
-            if debug: print("Trying fetch as class-level call...")
-            raw = fetch(video_id, languages=languages)
-            if debug: print("fetch(class) returned:", type(raw))
-            return _normalize_to_text_with_timestamps(raw)
-        except TypeError as e:
-            if debug: print("fetch may be instance method; trying instance.fetch() ...", e)
-            try:
-                instance = api()
-                raw = instance.fetch(video_id, languages=languages)
-                if debug: print("fetch(instance) returned:", type(raw))
-                return _normalize_to_text_with_timestamps(raw)
-            except Exception as e_inst:
-                if debug: print("instance.fetch failed:", type(e_inst).__name__, e_inst)
-
-    if hasattr(api, "list"):
-        try:
-            if debug: print("Trying api.list(video_id)...")
-            raw_list_obj = api.list(video_id)
-            if hasattr(raw_list_obj, "fetch"):
-                raw = raw_list_obj.fetch(languages=languages)
-                return _normalize_to_text_with_timestamps(raw)
-            return _normalize_to_text_with_timestamps(raw_list_obj)
-        except Exception as e_list:
-            if debug: print("api.list failed:", type(e_list).__name__, e_list)
-
-    raise RuntimeError("Could not retrieve transcript: no usable get_transcript/fetch/list invocation succeeded.")
 
 # ---------- RAG helpers ----------
-
 def build_vector_store_from_transcript(transcript: str):
     splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     docs = splitter.create_documents([transcript])
@@ -189,6 +167,7 @@ def build_vector_store_from_transcript(transcript: str):
     vector_store = FAISS.from_documents(docs, embeddings)
     retriever = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 4})
     return vector_store, retriever
+
 
 PROMPT = PromptTemplate(
     template="""
@@ -200,12 +179,13 @@ If the context is insufficient, say you don't know.
 
 Question: {question}
 """,
-    input_variables=['context', 'question']
+    input_variables=["context", "question"],
 )
 
 
 def get_llm():
     return ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.2)
+
 
 # ---------- Endpoints ----------
 @app.post("/fetch_transcript")
@@ -219,7 +199,7 @@ async def fetch_transcript(req: FetchRequest):
 
         video_id = None
         try:
-            video_id = extract_youtube_id = None
+            video_id = extract_youtube_id = None  # extract_youtube_id unused, but harmless
             # reuse small regex from frontend
             m = re.search(r"(?:v=|\/v\/|youtu\.be\/|embed\/)([A-Za-z0-9_-]{6,})", url)
             if m:
@@ -233,25 +213,36 @@ async def fetch_transcript(req: FetchRequest):
         try:
             transcript_list = get_transcript_list_with_timestamps(video_id, languages=[lang], debug=False)
         except TranscriptsDisabled:
-            return JSONResponse({"success": False, "message": "Transcripts are disabled for this video."}, status_code=404)
+            return JSONResponse(
+                {"success": False, "message": "Transcripts are disabled for this video."},
+                status_code=404,
+            )
         except NoTranscriptFound:
-            return JSONResponse({"success": False, "message": "No transcript found for this video."}, status_code=404)
+            return JSONResponse(
+                {"success": False, "message": "No transcript found for this video."},
+                status_code=404,
+            )
 
         transcript = " ".join(chunk["text"] for chunk in transcript_list if chunk.get("text"))
         if not transcript.strip():
-            return JSONResponse({"success": False, "message": "Transcript is empty after parsing."}, status_code=500)
+            return JSONResponse(
+                {"success": False, "message": "Transcript is empty after parsing."},
+                status_code=500,
+            )
 
         with _state_lock:
             _vector_store, _retriever = build_vector_store_from_transcript(transcript)
             _transcript_text = transcript
             _video_id = video_id
 
-        return JSONResponse({
-            "success": True,
-            "message": "Transcript fetched and indexed",
-            "transcript_preview": transcript[:1000],
-            "video_id": video_id,
-        })
+        return JSONResponse(
+            {
+                "success": True,
+                "message": "Transcript fetched and indexed",
+                "transcript_preview": transcript[:1000],
+                "video_id": video_id,
+            }
+        )
     except Exception as e:
         traceback.print_exc()
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
@@ -259,7 +250,7 @@ async def fetch_transcript(req: FetchRequest):
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
-    global _retriever, _transcript_text
+    global _retriever, _transcript_text, _vector_store
     try:
         question = req.question.strip()
         top_k = req.top_k or 4
@@ -267,7 +258,10 @@ async def chat(req: ChatRequest):
             return JSONResponse({"success": False, "message": "Question is empty"}, status_code=400)
 
         if _retriever is None:
-            return JSONResponse({"success": False, "message": "No transcript indexed. Call /fetch_transcript first."}, status_code=400)
+            return JSONResponse(
+                {"success": False, "message": "No transcript indexed. Call /fetch_transcript first."},
+                status_code=400,
+            )
 
         retrieved_docs = None
         try:
@@ -294,13 +288,18 @@ async def chat(req: ChatRequest):
         final_prompt = PROMPT.invoke({"context": context_text, "question": question})
         answer_obj = llm.invoke(final_prompt)
 
-        answer_text = None
         if isinstance(answer_obj, dict):
             answer_text = answer_obj.get("content") or answer_obj.get("answer") or str(answer_obj)
         else:
-            answer_text = getattr(answer_obj, "content", None) or getattr(answer_obj, "text", None) or str(answer_obj)
+            answer_text = (
+                getattr(answer_obj, "content", None)
+                or getattr(answer_obj, "text", None)
+                or str(answer_obj)
+            )
 
-        return JSONResponse({"success": True, "answer": answer_text, "source_snippet": context_text[:1000]})
+        return JSONResponse(
+            {"success": True, "answer": answer_text, "source_snippet": context_text[:1000]}
+        )
     except Exception as e:
         traceback.print_exc()
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
@@ -326,7 +325,10 @@ async def ask(req: AskRequest):
         m = re.search(r"(?:v=|\/v\/|youtu\.be\/|embed\/)([A-Za-z0-9_-]{6,})", url)
         video_id = m.group(1) if m else None
         if not video_id:
-            return JSONResponse({"success": False, "message": "Could not extract video id from URL"}, status_code=400)
+            return JSONResponse(
+                {"success": False, "message": "Could not extract video id from URL"},
+                status_code=400,
+            )
 
         need_index = False
         with _state_lock:
@@ -337,13 +339,22 @@ async def ask(req: AskRequest):
             try:
                 transcript_list = get_transcript_list_with_timestamps(video_id, languages=[lang], debug=False)
             except TranscriptsDisabled:
-                return JSONResponse({"success": False, "message": "Transcripts disabled for this video."}, status_code=404)
+                return JSONResponse(
+                    {"success": False, "message": "Transcripts disabled for this video."},
+                    status_code=404,
+                )
             except NoTranscriptFound:
-                return JSONResponse({"success": False, "message": "No transcript found for this video."}, status_code=404)
+                return JSONResponse(
+                    {"success": False, "message": "No transcript found for this video."},
+                    status_code=404,
+                )
 
             transcript = " ".join(chunk["text"] for chunk in transcript_list if chunk.get("text"))
             if not transcript.strip():
-                return JSONResponse({"success": False, "message": "Transcript is empty."}, status_code=500)
+                return JSONResponse(
+                    {"success": False, "message": "Transcript is empty."},
+                    status_code=500,
+                )
 
             with _state_lock:
                 _vector_store, _retriever = build_vector_store_from_transcript(transcript)
@@ -371,13 +382,23 @@ async def ask(req: AskRequest):
         final_prompt = PROMPT.invoke({"context": context_text, "question": question})
         answer_obj = llm.invoke(final_prompt)
 
-        answer_text = None
         if isinstance(answer_obj, dict):
             answer_text = answer_obj.get("content") or answer_obj.get("answer") or str(answer_obj)
         else:
-            answer_text = getattr(answer_obj, "content", None) or getattr(answer_obj, "text", None) or str(answer_obj)
+            answer_text = (
+                getattr(answer_obj, "content", None)
+                or getattr(answer_obj, "text", None)
+                or str(answer_obj)
+            )
 
-        return JSONResponse({"success": True, "answer": answer_text, "transcript_preview": (_transcript_text or "")[:1000], "video_id": video_id})
+        return JSONResponse(
+            {
+                "success": True,
+                "answer": answer_text,
+                "transcript_preview": (_transcript_text or "")[:1000],
+                "video_id": video_id,
+            }
+        )
     except Exception as e:
         traceback.print_exc()
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
