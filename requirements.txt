@@ -2,8 +2,8 @@ fastapi
 uvicorn
 python-dotenv
 google-generativeai
-langchain
-langchain-core
+langchain==0.1.20
+langchain-core==0.1.52
 langchain-community
 langchain-google-genai
 faiss-cpu
