@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>YouTube RAG Chat</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="app">
+    <div class="panel left">
+      <h1>YouTube → RAG Chat</h1>
+      <div class="muted">Paste a YouTube link, choose caption language and fetch transcript to enable chatting.</div>
+
+      <div>
+        <label for="yturl">YouTube URL</label>
+        <input id="yturl" type="text" placeholder="Paste YouTube link here..." />
+      </div>
+
+      <div>
+        <label for="lang">Caption language</label>
+        <select id="lang">
+          <option value="en">English (en)</option>
+          <option value="hi">Hindi (hi)</option>
+          <option value="es">Spanish (es)</option>
+          <option value="fr">French (fr)</option>
+          <option value="de">German (de)</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <button id="fetchBtn" class="btn-primary">Fetch Transcript</button>
+        <button id="clearBtn" class="btn-ghost">Clear</button>
+      </div>
+
+      <div id="status" class="meta">Status: Idle</div>
+
+      <div id="videoWrap" style="display:none">
+        <div style="margin-top:12px; font-size:13px;color:var(--muted)">Video preview</div>
+        <div class="video-preview" id="videoPreview"></div>
+      </div>
+
+      <div style="margin-top:12px">
+        <div style="font-size:13px;color:var(--muted); margin-bottom:6px">Transcript preview</div>
+        <div id="transcriptPreview" style="font-size:13px;color:var(--muted); max-height:160px; overflow:auto; padding:10px; border-radius:8px; border:1px solid rgba(255,255,255,0.02); background:rgba(255,255,255,0.01)"></div>
+      </div>
+
+      <div style="margin-top:auto; font-size:12px; color:var(--muted)">Note: your backend must expose <code>/fetch_transcript</code>, <code>/chat</code> and <code>/ask</code> POST endpoints that accept JSON.</div>
+    </div>
+
+    <div class="panel chat-panel">
+      <div style="display:flex; align-items:center; justify-content:space-between; gap:12px">
+        <div style="display:flex; gap:12px; align-items:center">
+          <strong>Chat</strong>
+          <div id="ingestedIndicator" class="muted">(no transcript indexed)</div>
+        </div>
+        <div id="topLoader" style="height:28px; display:flex; align-items:center; gap:8px"></div>
+      </div>
+
+      <div id="messages" class="messages"></div>
+
+      <div class="controls">
+        <input id="questionInput" type="text" placeholder="Type your question..." disabled />
+        <button id="sendBtn" class="btn-primary" disabled>Send</button>
+        <button id="clearChat" class="btn-ghost">Clear Chat</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js" defer></script>
+</body>
+</html>
