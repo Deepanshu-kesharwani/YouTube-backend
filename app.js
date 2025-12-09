@@ -1,6 +1,6 @@
 // --------- Configuration ---------
 // Set this to your backend address. 
-const API_BASE = 'https://youtube-backend-chatbot.onrender.com';
+const API_BASE = 'https://youtube-backend-chat.onrender.com';
 const FETCH_ENDPOINT = API_BASE + '/fetch_transcript';
 const CHAT_ENDPOINT  = API_BASE + '/chat';
 const ASK_ENDPOINT   = API_BASE + '/ask';
@@ -201,5 +201,6 @@ async function sendQuestion(){
 
 // initial welcome
 addMessage('Hello! Paste a YouTube link on the left and click "Fetch Transcript" to begin.','ai');
+
 
 
