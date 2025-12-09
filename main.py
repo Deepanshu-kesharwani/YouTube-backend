@@ -4,7 +4,6 @@ This file provides /fetch_transcript, /chat and /ask endpoints.
 Drop this into your Python project and run with:
 
   export GOOGLE_API_KEY="YOUR_KEY"
-  uvicorn main:app --reload --port 8000
 
 Make sure necessary libraries are installed in your venv.
 """
