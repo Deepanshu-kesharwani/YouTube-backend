@@ -8,6 +8,6 @@ langchain-community
 langchain-google-genai
 faiss-cpu
 sentence-transformers
-youtube-transcript-api
 pydantic
 typing_extensions
+youtube-transcript-api==0.6.2
