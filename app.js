@@ -5,7 +5,7 @@ const FETCH_ENDPOINT = API_BASE + '/fetch_transcript';
 const CHAT_ENDPOINT  = API_BASE + '/chat';
 const ASK_ENDPOINT   = API_BASE + '/ask';
 const HEALTH_ENDPOINT = API_BASE + '/health';
-
+// backend
 // request timeout (ms)
 const FETCH_TIMEOUT = 30_000; // 30s
 
@@ -272,3 +272,4 @@ async function sendQuestion(){
 
 // initial welcome
 addMessage('Hello! Paste a YouTube link on the left and click "Fetch Transcript" to begin.','ai');
+
