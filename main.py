@@ -1,7 +1,7 @@
 """
 FastAPI backend for YouTube RAG Chat.
 Provides /fetch_transcript, /chat and /ask endpoints.
-chnage
+
 Run locally:
   export GOOGLE_API_KEY="YOUR_KEY"
   uvicorn main:app --reload --port 8000
@@ -24,7 +24,6 @@ from pydantic import BaseModel
 from youtube_transcript_api import YouTubeTranscriptApi, TranscriptsDisabled, NoTranscriptFound
 
 # LangChain / embeddings / FAISS / Gemini
-# NOTE: pin your langchain / related packages in requirements if you hit import errors.
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
@@ -200,29 +199,16 @@ def get_transcript_list_with_timestamps(video_id, languages=None, debug=False):
     """
     Attempts multiple ways to fetch a transcript to support multiple versions
     of youtube-transcript-api:
-      - YouTubeTranscriptApi.get_transcript(...)  (older)
-      - YouTubeTranscriptApi().fetch(...)          (newer)
-      - YouTubeTranscriptApi.list(...).fetch(...)  (alternate)
+      - instance.fetch() (newer)
+      - api.list(...).fetch(...) (alternate)
+      - fallback to any get_transcript if available
     Raises TranscriptsDisabled / NoTranscriptFound per the library when appropriate.
     """
     api = YouTubeTranscriptApi
 
-    # 1) Try old classmethod first (if present)
+    # 1) Try instance-based fetch()
     try:
-        if hasattr(api, "get_transcript"):
-            if debug: print("Using YouTubeTranscriptApi.get_transcript(...)")
-            raw = api.get_transcript(video_id, languages=languages)
-            return _normalize_to_text_with_timestamps(raw)
-    except TranscriptsDisabled:
-        raise
-    except NoTranscriptFound:
-        raise
-    except Exception as e:
-        if debug: print("get_transcript failed:", type(e).__name__, e)
-
-    # 2) Try instance-based fetch()
-    try:
-        if debug: print("Trying instance.fetch()")
+        if debug: print("Using YouTubeTranscriptApi().fetch()")
         instance = api()
         fetched = instance.fetch(video_id, languages=languages)
         raw = fetched.to_raw_data() if hasattr(fetched, "to_raw_data") else fetched
@@ -234,7 +220,7 @@ def get_transcript_list_with_timestamps(video_id, languages=None, debug=False):
     except Exception as e:
         if debug: print("instance.fetch failed:", type(e).__name__, e)
 
-    # 3) Try api.list(video_id) path
+    # 2) Try api.list(video_id) path
     try:
         if hasattr(api, "list"):
             if debug: print("Trying YouTubeTranscriptApi.list(...)")
@@ -252,10 +238,23 @@ def get_transcript_list_with_timestamps(video_id, languages=None, debug=False):
     except Exception as e:
         if debug: print("api.list path failed:", type(e).__name__, e)
 
-    # If nothing worked, raise a clear error (endpoints catch this and return 500)
+    # 3) Fallback: try getattr(api, "get_transcript", None) if present
+    try:
+        method = getattr(api, "get_transcript", None)
+        if callable(method):
+            if debug: print("Falling back to api.get_transcript(...)")
+            raw = method(video_id, languages=languages)
+            return _normalize_to_text_with_timestamps(raw)
+    except TranscriptsDisabled:
+        raise
+    except NoTranscriptFound:
+        raise
+    except Exception as e:
+        if debug: print("fallback get_transcript failed:", type(e).__name__, e)
+
     raise RuntimeError(
-        "Failed to retrieve transcript: youtube-transcript-api did not expose any known interface "
-        "(checked get_transcript, instance.fetch, api.list)."
+        "Failed to retrieve transcript: youtube-transcript-api did not expose any usable interface. "
+        "Tried instance.fetch(), api.list(...), and fallback get_transcript."
     )
 
 # ---------- RAG helpers ----------
@@ -293,7 +292,7 @@ async def fetch_transcript(req: FetchRequest):
         if not url:
             return JSONResponse({"success": False, "message": "Missing url"}, status_code=400)
 
-        video_id = extract_youtube_id_from_url = None
+        # correctly call helper (DO NOT shadow function name)
         try:
             video_id = extract_youtube_id_from_url(url)
         except Exception:
@@ -393,7 +392,7 @@ async def ask(req: AskRequest):
         if not question:
             return JSONResponse({"success": False, "message": "Missing question"}, status_code=400)
 
-        video_id = extract_youtube_id_from_url = None
+        # correctly call helper (DO NOT shadow function name)
         try:
             video_id = extract_youtube_id_from_url(url)
         except Exception:
