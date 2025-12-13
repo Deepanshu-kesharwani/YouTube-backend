@@ -62,7 +62,7 @@ Gemini LLM Answer
 ## 🛠️ Tech Stack
 
 - Backend: FastAPI  
-- Speech-to-Text: OpenAI Whisper  
+- Speech-to-Text: Faster Whisper  
 - LLM (Answering): Google Gemini  
 - Vector Store: FAISS  
 - Embeddings: Sentence Transformers  
@@ -228,7 +228,6 @@ Whisper transcribes the audio itself, avoiding issues with missing or blocked ca
 - Split Whisper & RAG into microservices for scalability
 - Add a richer frontend UI
 
-If you'd like, I can help implement any of these improvements or optimize Whisper for faster inference.
 
 ---
 
