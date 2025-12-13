@@ -1,218 +1,171 @@
-"""
-FastAPI backend for YouTube RAG Chat
-Features:
-- YouTube Data API captions
-- Hindi + English fallback
-- Gemini answers
-- Timestamped answers
-"""
-
 import os
 import re
-import traceback
-from typing import Optional, List
+import subprocess
+import tempfile
+import threading
+from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+
 from dotenv import load_dotenv
-
 import google.generativeai as genai
-from googleapiclient.discovery import build
 
-# -------------------- ENV --------------------
+from faster_whisper import WhisperModel
+
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_community.vectorstores import FAISS
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.prompts import PromptTemplate
+
+# --------------------------------------------------
+# ENV
+# --------------------------------------------------
 load_dotenv()
-
-YOUTUBE_API_KEY = os.getenv("YOUTUBE_API_KEY")
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-
-if not YOUTUBE_API_KEY or not GEMINI_API_KEY:
-    raise RuntimeError("Missing API keys")
+GEMINI_API_KEY = os.getenv("GOOGLE_API_KEY")
+if not GEMINI_API_KEY:
+    raise RuntimeError("Missing GOOGLE_API_KEY")
 
 genai.configure(api_key=GEMINI_API_KEY)
-youtube = build("youtube", "v3", developerKey=YOUTUBE_API_KEY)
 
-# -------------------- APP --------------------
-app = FastAPI(title="YouTube RAG Chat API")
+# --------------------------------------------------
+# APP
+# --------------------------------------------------
+app = FastAPI(title="YouTube RAG Chat (Whisper)")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# -------------------- MODELS --------------------
+# --------------------------------------------------
+# MODELS
+# --------------------------------------------------
 class FetchRequest(BaseModel):
     url: str
-    lang: Optional[str] = None  # auto if None
 
 class ChatRequest(BaseModel):
     question: str
 
-class AskRequest(BaseModel):
-    url: str
-    question: str
-    lang: Optional[str] = None
+# --------------------------------------------------
+# GLOBAL STATE
+# --------------------------------------------------
+_lock = threading.Lock()
+_vector_store = None
+_retriever = None
+_transcript_text = ""
 
-# -------------------- STATE --------------------
-TRANSCRIPT = []   # list of {start, text}
-VIDEO_ID = None
-
-# -------------------- HELPERS --------------------
+# --------------------------------------------------
+# UTIL
+# --------------------------------------------------
 def extract_video_id(url: str) -> Optional[str]:
     m = re.search(r"(?:v=|youtu\.be/)([A-Za-z0-9_-]{11})", url)
     return m.group(1) if m else None
 
+# --------------------------------------------------
+# DOWNLOAD AUDIO
+# --------------------------------------------------
+def download_audio(video_id: str, out_dir: str) -> str:
+    output_path = os.path.join(out_dir, "audio.%(ext)s")
+    subprocess.run([
+        "yt-dlp",
+        "-f", "bestaudio",
+        "-x", "--audio-format", "mp3",
+        "-o", output_path,
+        f"https://www.youtube.com/watch?v={video_id}"
+    ], check=True)
 
-def srt_to_segments(srt: str):
-    segments = []
-    current_time = None
+    return os.path.join(out_dir, "audio.mp3")
 
-    for line in srt.splitlines():
-        if "-->" in line:
-            start = line.split("-->")[0].strip()
-            h, m, s = start.replace(",", ":").split(":")
-            current_time = int(h)*3600 + int(m)*60 + int(float(s))
-        elif line.strip() and not line.strip().isdigit():
-            segments.append({
-                "start": current_time,
-                "text": line.strip()
-            })
+# --------------------------------------------------
+# WHISPER TRANSCRIBE
+# --------------------------------------------------
+def whisper_transcribe(audio_path: str) -> str:
+    model = WhisperModel("base", device="cpu", compute_type="int8")
+    segments, _ = model.transcribe(audio_path)
+    return " ".join(seg.text for seg in segments)
 
-    return segments
+# --------------------------------------------------
+# RAG
+# --------------------------------------------------
+def build_vector_store(text: str):
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
+    docs = splitter.create_documents([text])
 
+    embeddings = HuggingFaceEmbeddings(
+        model_name="sentence-transformers/all-MiniLM-L6-v2"
+    )
 
-def fetch_captions(video_id: str, lang: Optional[str]):
-    captions = youtube.captions().list(
-        part="snippet",
-        videoId=video_id
-    ).execute()
+    store = FAISS.from_documents(docs, embeddings)
+    retriever = store.as_retriever(search_kwargs={"k": 4})
+    return store, retriever
 
-    # Priority: Hindi → English → anything
-    lang_priority = []
-    if lang:
-        lang_priority.append(lang)
-    else:
-        lang_priority.extend(["hi", "en"])
+PROMPT = PromptTemplate(
+    template="""
+Answer ONLY using the transcript context.
 
-    caption_id = None
-    for lp in lang_priority:
-        for c in captions.get("items", []):
-            if c["snippet"]["language"] == lp:
-                caption_id = c["id"]
-                break
-        if caption_id:
-            break
-
-    if not caption_id:
-        raise RuntimeError("No captions available")
-
-    srt = youtube.captions().download(
-        id=caption_id,
-        tfmt="srt"
-    ).execute()
-
-    return srt.decode("utf-8")
-
-
-def ask_gemini(question: str, transcript_text: str):
-    model = genai.GenerativeModel("gemini-1.5-flash")
-    prompt = f"""
-Answer ONLY from the transcript.
-
-Transcript:
-{transcript_text}
+Context:
+{context}
 
 Question:
 {question}
-"""
-    return model.generate_content(prompt).text.strip()
+""",
+    input_variables=["context", "question"]
+)
 
+def get_llm():
+    return ChatGoogleGenerativeAI(model="gemini-2.5-flash")
 
-def find_timestamps(answer: str):
-    hits = []
-    for seg in TRANSCRIPT:
-        if seg["text"].lower() in answer.lower():
-            hits.append({
-                "time": f"{seg['start']//60:02d}:{seg['start']%60:02d}",
-                "seconds": seg["start"],
-                "text": seg["text"]
-            })
-    return hits[:5]
-
-# -------------------- ROUTES --------------------
+# --------------------------------------------------
+# API
+# --------------------------------------------------
 @app.post("/fetch_transcript")
 async def fetch_transcript(req: FetchRequest):
-    global TRANSCRIPT, VIDEO_ID
-
-    try:
-        vid = extract_video_id(req.url)
-        if not vid:
-            return JSONResponse({"success": False, "message": "Invalid URL"}, 400)
-
-        srt = fetch_captions(vid, req.lang)
-        TRANSCRIPT = srt_to_segments(srt)
-        VIDEO_ID = vid
-
-        preview = " ".join(s["text"] for s in TRANSCRIPT[:20])
-
-        return {
-            "success": True,
-            "video_id": vid,
-            "language_used": req.lang or "hi → en fallback",
-            "transcript_preview": preview
-        }
-
-    except Exception as e:
-        traceback.print_exc()
-        return JSONResponse({"success": False, "message": str(e)}, 500)
-
-
-@app.post("/chat")
-async def chat(req: ChatRequest):
-    if not TRANSCRIPT:
-        return JSONResponse({"success": False, "message": "No transcript"}, 400)
-
-    transcript_text = " ".join(s["text"] for s in TRANSCRIPT)
-    answer = ask_gemini(req.question, transcript_text)
-    timestamps = find_timestamps(answer)
-
-    return {
-        "success": True,
-        "answer": answer,
-        "timestamps": timestamps,
-        "video_id": VIDEO_ID
-    }
-
-
-@app.post("/ask")
-async def ask(req: AskRequest):
-    global TRANSCRIPT, VIDEO_ID
+    global _vector_store, _retriever, _transcript_text
 
     vid = extract_video_id(req.url)
     if not vid:
-        return JSONResponse({"success": False, "message": "Invalid URL"}, 400)
+        return JSONResponse({"success": False, "message": "Invalid YouTube URL"}, 400)
 
-    if VIDEO_ID != vid or not TRANSCRIPT:
-        srt = fetch_captions(vid, req.lang)
-        TRANSCRIPT = srt_to_segments(srt)
-        VIDEO_ID = vid
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            audio_path = download_audio(vid, tmp)
+            transcript = whisper_transcribe(audio_path)
 
-    transcript_text = " ".join(s["text"] for s in TRANSCRIPT)
-    answer = ask_gemini(req.question, transcript_text)
-    timestamps = find_timestamps(answer)
+        with _lock:
+            _vector_store, _retriever = build_vector_store(transcript)
+            _transcript_text = transcript
 
-    return {
-        "success": True,
-        "answer": answer,
-        "timestamps": timestamps,
-        "video_id": vid
-    }
+        return {
+            "success": True,
+            "message": "Transcript generated using Whisper",
+            "preview": transcript[:800]
+        }
 
+    except Exception as e:
+        return JSONResponse({"success": False, "message": str(e)}, 500)
+
+@app.post("/chat")
+async def chat(req: ChatRequest):
+    if not _retriever:
+        return JSONResponse({"success": False, "message": "No transcript loaded"}, 400)
+
+    docs = _retriever.get_relevant_documents(req.question)
+    context = "".join(d.page_content for d in docs)
+
+    llm = get_llm()
+    result = llm.invoke(PROMPT.invoke({
+        "context": context,
+        "question": req.question
+    }))
+
+    return {"success": True, "answer": result.content}
 
 @app.get("/health")
 async def health():
-    return {"ok": True, "segments": len(TRANSCRIPT)}
+    return {"ok": True}
