@@ -2,12 +2,13 @@ fastapi
 uvicorn
 python-dotenv
 google-generativeai
-langchain==0.1.20
-langchain-core==0.1.52
+langchain
+langchain-core
 langchain-community
 langchain-google-genai
 faiss-cpu
 sentence-transformers
 pydantic
 typing_extensions
-youtube-transcript-api==0.6.2
+yt-dlp
+requests
