@@ -1,15 +1,10 @@
 fastapi
-uvicorn
+uvicorn[standard]
+
 python-dotenv
-typing_extensions
+
 google-generativeai
+google-api-python-client
 
-langchain==0.2.6
-langchain-core==0.2.12
-langchain-community==0.2.5
-langchain-google-genai
-
-faiss-cpu
-sentence-transformers
-requests
-yt-dlp        # replaces youtube-transcript-api completely
+pydantic
+typing_extensions
