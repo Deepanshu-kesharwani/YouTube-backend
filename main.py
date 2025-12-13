@@ -1,68 +1,68 @@
 """
-FastAPI backend for YouTube RAG Chat using yt-dlp for transcripts.
-This replaces youtube-transcript-api because YouTube now blocks scraping.
+FastAPI backend for YouTube RAG Chat — yt-dlp + cookies support
 """
 
 import os
 import re
+import traceback
+from urllib.parse import urlparse, parse_qs
 import threading
 from typing import Optional
-from urllib.parse import urlparse, parse_qs
-import traceback as _traceback
-
 import yt_dlp
 import requests
-import xml.etree.ElementTree as ET
+from xml.etree import ElementTree as ET
 
-# FastAPI
+import google.generativeai as genai
+from dotenv import load_dotenv
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-# LangChain + FAISS
-from langchain.text_splitter import RecursiveCharacterTextSplitter
+# 🔥 LangChain & FAISS
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import HuggingFaceEmbeddings
 from langchain_community.vectorstores import FAISS
-from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import PromptTemplate
+from langchain_google_genai import ChatGoogleGenerativeAI
 
-import google.generativeai as genai
-from dotenv import load_dotenv
 
-# ---------------------------------------------------------
-# Environment
-# ---------------------------------------------------------
+# -------------------- ENV / CONFIG --------------------
 load_dotenv()
 GOOGLE_API_KEY = os.getenv("GOOGLE_API_KEY")
+
 if not GOOGLE_API_KEY:
-    print("WARNING: GOOGLE_API_KEY is missing")
+    print("⚠️ WARNING: GOOGLE_API_KEY missing!")
 
 genai.configure(api_key=GOOGLE_API_KEY)
 
-# ---------------------------------------------------------
-# FastAPI App
-# ---------------------------------------------------------
-app = FastAPI(title="YouTube RAG Chat API (yt-dlp)")
+COOKIE_FILE = "./cookies.txt"
+if not os.path.exists(COOKIE_FILE):
+    print("⚠️ WARNING: cookies.txt NOT FOUND — Some YouTube videos may fail!")
+
+
+# -------------------- FASTAPI APP --------------------
+app = FastAPI(title="YouTube RAG Chat API (yt-dlp + cookies)")
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
-    allow_credentials=True,
 )
 
-# ---------------------------------------------------------
-# Models
-# ---------------------------------------------------------
+
+# -------------------- REQUEST MODELS --------------------
 class FetchRequest(BaseModel):
     url: str
     lang: Optional[str] = "en"
 
+
 class ChatRequest(BaseModel):
     question: str
     top_k: Optional[int] = 4
+
 
 class AskRequest(BaseModel):
     url: str
@@ -70,129 +70,123 @@ class AskRequest(BaseModel):
     question: str
     top_k: Optional[int] = 4
 
-# ---------------------------------------------------------
-# Global State
-# ---------------------------------------------------------
+
+# -------------------- GLOBAL STATE --------------------
 _state_lock = threading.Lock()
 _vector_store = None
 _retriever = None
 _transcript_text = ""
 _video_id = None
 
-# ---------------------------------------------------------
-# Utility: Extract YouTube Video ID
-# ---------------------------------------------------------
-def extract_youtube_id(url: str):
-    """Returns an 11-char YouTube video ID."""
+
+# -------------------- YOUTUBE ID EXTRACTION --------------------
+def extract_youtube_id(url: str) -> Optional[str]:
+    """Robust extraction of 11-character YouTube video ID"""
+
     if not url:
         return None
 
     s = url.strip()
 
-    # Direct ID
+    # Raw ID?
     if re.fullmatch(r"[A-Za-z0-9_-]{11}", s):
         return s
 
-    try:
-        parsed = urlparse(s)
-        hostname = (parsed.hostname or "").lower()
+    parsed = urlparse(s)
+    qs = parse_qs(parsed.query)
 
-        # watch?v=
-        if "youtube.com" in hostname:
-            qs = parse_qs(parsed.query)
-            if "v" in qs:
-                vid = qs["v"][0]
-                if re.fullmatch(r"[A-Za-z0-9_-]{11}", vid):
-                    return vid
+    if "v" in qs:
+        vid = qs["v"][0]
+        if re.fullmatch(r"[A-Za-z0-9_-]{11}", vid):
+            return vid
 
-        # youtu.be/ID
-        if "youtu.be" in hostname:
-            vid = parsed.path.lstrip("/")
-            if re.fullmatch(r"[A-Za-z0-9_-]{11}", vid):
-                return vid
+    # youtu.be/
+    if "youtu.be" in (parsed.hostname or ""):
+        vid = parsed.path.lstrip("/")
+        if re.fullmatch(r"[A-Za-z0-9_-]{11}", vid):
+            return vid
 
-    except Exception:
-        pass
+    # /embed/VIDEO_ID
+    m = re.search(r"(?:embed|shorts|v)/([A-Za-z0-9_-]{11})", s)
+    if m:
+        return m.group(1)
 
-    m = re.search(r"([A-Za-z0-9_-]{11})", s)
-    return m.group(1) if m else None
+    return None
 
-# ---------------------------------------------------------
-# Transcript Fetcher Using yt-dlp
-# ---------------------------------------------------------
-def fetch_transcript(video_id: str, lang="en"):
-    """
-    Fetches YouTube transcript using yt-dlp (supports auto captions).
-    """
+
+# -------------------- yt-dlp TRANSCRIPT FETCHER --------------------
+def fetch_transcript_ytdlp(video_id: str, lang="en") -> str:
     url = f"https://www.youtube.com/watch?v={video_id}"
 
-    ydl_opts = {
+    options = {
         "skip_download": True,
         "writesubtitles": True,
         "writeautomaticsub": True,
         "subtitleslangs": [lang],
         "quiet": True,
+        "cookiefile": COOKIE_FILE if os.path.exists(COOKIE_FILE) else None,
     }
 
-    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+    with yt_dlp.YoutubeDL(options) as ydl:
         info = ydl.extract_info(url, download=False)
 
-        subtitles = info.get("subtitles") or info.get("automatic_captions")
+        subs = info.get("subtitles") or info.get("automatic_captions")
+        if not subs:
+            raise RuntimeError("No transcript/subtitle available.")
 
-        if not subtitles or lang not in subtitles:
-            raise RuntimeError(f"No subtitles found for language: {lang}")
+        tracks = subs.get(lang)
+        if not tracks:
+            raise RuntimeError(f"No transcript found for language={lang}")
 
-        sub_url = subtitles[lang][0]["url"]
+        subtitle_url = tracks[0]["url"]
+        res = requests.get(subtitle_url)
+        if res.status_code != 200:
+            raise RuntimeError(f"Could not download subtitles")
 
-        r = requests.get(sub_url)
-        r.raise_for_status()
-        xml_text = r.text
+        return res.text
 
-        root = ET.fromstring(xml_text)
 
-        segments = []
-        for child in root.findall(".//text"):
-            text = child.text or ""
-            start = float(child.attrib.get("start", 0))
-            dur = float(child.attrib.get("dur", 0))
-            segments.append({"text": text, "start": start, "duration": dur})
+def xml_to_text(xml_data: str) -> str:
+    root = ET.fromstring(xml_data)
+    lines = []
+    for child in root.findall(".//text"):
+        txt = (child.text or "").replace("\n", " ").strip()
+        lines.append(txt)
+    return " ".join(lines)
 
-        return segments
 
-# ---------------------------------------------------------
-# Build RAG Vector Store
-# ---------------------------------------------------------
+# -------------------- RAG SETUP --------------------
 def build_vector_store(transcript: str):
-    splitter = RecursiveCharacterTextSplitter(chunk_size=800, chunk_overlap=150)
+    splitter = RecursiveCharacterTextSplitter(chunk_size=1000, chunk_overlap=200)
     docs = splitter.create_documents([transcript])
 
-    emb = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
-    store = FAISS.from_documents(docs, emb)
-    retriever = store.as_retriever(search_type="similarity", search_kwargs={"k": 4})
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    store = FAISS.from_documents(docs, embeddings)
+    retriever = store.as_retriever()
 
     return store, retriever
 
-PROMPT = PromptTemplate(
-    template="""
-Answer ONLY from the video transcript.
 
-CONTEXT:
+PROMPT = PromptTemplate(
+    input_variables=["context", "question"],
+    template="""
+Answer using ONLY the following transcript context:
+
 {context}
 
-QUESTION:
+Question:
 {question}
 """,
-    input_variables=["context", "question"]
 )
+
 
 def get_llm():
     return ChatGoogleGenerativeAI(model="gemini-2.5-flash", temperature=0.2)
 
-# ---------------------------------------------------------
-# API Endpoints
-# ---------------------------------------------------------
+
+# -------------------- ROUTES --------------------
 @app.post("/fetch_transcript")
-async def fetch_transcript_api(req: FetchRequest):
+async def fetch_transcript(req: FetchRequest):
     global _vector_store, _retriever, _transcript_text, _video_id
 
     vid = extract_youtube_id(req.url)
@@ -200,12 +194,11 @@ async def fetch_transcript_api(req: FetchRequest):
         return JSONResponse({"success": False, "message": "Invalid YouTube URL"}, status_code=400)
 
     try:
-        segments = fetch_transcript(vid, lang=req.lang)
+        xml = fetch_transcript_ytdlp(vid, req.lang)
+        transcript = xml_to_text(xml)
     except Exception as e:
-        print("[ERROR] Transcript fetch failed:", e)
+        print("[TRANSCRIPT ERROR]", e)
         return JSONResponse({"success": False, "message": str(e)}, status_code=500)
-
-    transcript = " ".join(s["text"] for s in segments)
 
     with _state_lock:
         _vector_store, _retriever = build_vector_store(transcript)
@@ -214,60 +207,69 @@ async def fetch_transcript_api(req: FetchRequest):
 
     return {
         "success": True,
-        "message": "Transcript fetched & indexed",
+        "message": "Transcript successfully indexed",
         "video_id": vid,
-        "transcript_preview": transcript[:800]
+        "transcript_preview": transcript[:800],
     }
+
 
 @app.post("/chat")
 async def chat(req: ChatRequest):
+    global _retriever
+
     if not _retriever:
-        return JSONResponse({"success": False, "message": "No transcript loaded"}, status_code=400)
+        return JSONResponse({"success": False, "message": "No transcript indexed"}, status_code=400)
 
     docs = _retriever.get_relevant_documents(req.question)
     context = "".join(d.page_content for d in docs)
 
     llm = get_llm()
-    result = llm.invoke(PROMPT.invoke({"context": context, "question": req.question}))
+    final_prompt = PROMPT.invoke({"context": context, "question": req.question})
+
+    result = llm.invoke(final_prompt)
 
     return {"success": True, "answer": str(result)}
 
+
 @app.post("/ask")
 async def ask(req: AskRequest):
-    """
-    Fetch transcript + answer question in one call.
-    """
-    global _vector_store, _retriever, _transcript_text, _video_id
+    url = req.url
+    lang = req.lang
+    question = req.question
 
-    vid = extract_youtube_id(req.url)
+    vid = extract_youtube_id(url)
     if not vid:
         return JSONResponse({"success": False, "message": "Invalid YouTube URL"}, status_code=400)
 
-    # Re-index if different video
-    if _video_id != vid:
+    global _vector_store, _retriever, _transcript_text, _video_id
+
+    # Re-index if switching videos
+    if _video_id != vid or _retriever is None:
         try:
-            segments = fetch_transcript(vid, lang=req.lang)
+            xml = fetch_transcript_ytdlp(vid, lang)
+            transcript = xml_to_text(xml)
         except Exception as e:
             return JSONResponse({"success": False, "message": str(e)}, status_code=500)
-
-        transcript = " ".join(s["text"] for s in segments)
 
         with _state_lock:
             _vector_store, _retriever = build_vector_store(transcript)
             _transcript_text = transcript
             _video_id = vid
 
-    docs = _retriever.get_relevant_documents(req.question)
+    docs = _retriever.get_relevant_documents(question)
     context = "".join(d.page_content for d in docs)
+
     llm = get_llm()
-    result = llm.invoke(PROMPT.invoke({"context": context, "question": req.question}))
+    final_prompt = PROMPT.invoke({"context": context, "question": question})
+    result = llm.invoke(final_prompt)
 
     return {
         "success": True,
         "answer": str(result),
         "video_id": vid,
-        "transcript_preview": _transcript_text[:800]
+        "transcript_preview": _transcript_text[:800],
     }
+
 
 @app.get("/health")
 async def health():
