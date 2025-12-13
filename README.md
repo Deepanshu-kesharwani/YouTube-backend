@@ -1,8 +1,8 @@
-# 🎥 YouTube RAG BASED Chatbot
+# 🎥 YouTube RAG Based Chatbot
 
 A lightweight YouTube video question-answering system that transcribes a video's audio using OpenAI Whisper, indexes the transcript with a vector store (FAISS), and answers user questions with Google Gemini using Retrieval-Augmented Generation (RAG). This approach avoids YouTube caption restrictions by transcribing audio directly, so it works reliably for any video.
 
-- 🔊 Audio → Text using OpenAI Whisper  
+- 🔊 Audio → Text using Faster Whisper  
 - 🧠 RAG over video content with Google Gemini  
 - 🐳 Dockerized and deployable on any container host  
 - ⚡ FastAPI backend with simple REST endpoints  
