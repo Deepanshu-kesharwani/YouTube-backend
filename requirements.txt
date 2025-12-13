@@ -3,7 +3,7 @@ uvicorn[standard]
 python-dotenv
 
 # Whisper + audio
-openai-whisper
+faster-whisper
 ffmpeg-python
 yt-dlp
 
