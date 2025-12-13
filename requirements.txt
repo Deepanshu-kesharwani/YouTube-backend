@@ -1,10 +1,22 @@
 fastapi
 uvicorn[standard]
-
 python-dotenv
 
-google-generativeai
-google-api-python-client
+# Whisper + audio
+openai-whisper
+ffmpeg-python
+yt-dlp
 
-pydantic
-typing_extensions
+# LangChain (NEW structure)
+langchain
+langchain-community
+langchain-core
+langchain-text-splitters
+
+# Vector DB + embeddings
+faiss-cpu
+sentence-transformers
+
+# Gemini
+google-generativeai
+langchain-google-genai
